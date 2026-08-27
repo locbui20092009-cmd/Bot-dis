@@ -7,6 +7,9 @@ const db = new JsonDB(new Config("database", true, false, '/'));
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const app = express();
 
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+
 const TOKEN_BOT = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const ADMIN_CHANNEL_ID = process.env.ADMIN_CHANNEL_ID;
@@ -18,8 +21,9 @@ const SHRINKME_API_KEY = process.env.SHRINKME_API_KEY || "bbfe266096d2604965ff23
 const OCTOLINKZ_API_KEY = process.env.OCTOLINKZ_API_KEY || "c29d86aeeebb654a71cf856db9955ac94ec09385";
 
 const SO_XU_THUONG = 100;
-const GIOI_HAN_MAC_DINH = 3; // Mặc định 3 lượt / loại link / 24h
+const GIOI_HAN_MAC_DINH = 3;
 const usedTokens = new Set();
+const pendingCaptchas = new Map(); // Lưu mã Captcha tạm thời
 
 // Helper Functions
 async function getXu(id) { try { return await db.getData(`/xu/${id}`) || 0; } catch { return 0; } }
@@ -27,7 +31,6 @@ async function addXu(id, amt) { const t = (await getXu(id)) + amt; await db.push
 async function getLimit(id) { try { return await db.getData(`/limit/${id}`) || GIOI_HAN_MAC_DINH; } catch { return GIOI_HAN_MAC_DINH; } }
 async function setLimit(id, max) { await db.push(`/limit/${id}`, max); }
 
-// Lấy lịch sử vượt link của riêng từng loại link (shrtfly / shrinkme / octolinkz)
 async function getLinkHistory(id, linkType) {
     try {
         const h = await db.getData(`/history_${linkType}/${id}`) || [], now = Date.now();
@@ -48,41 +51,100 @@ async function checkIsAdmin(member, userId) {
     }
 }
 
-// Xử lý khi Vượt Captcha + Vượt Link thành công
+// BƯỚC 1: Link vượt QC dẫn về đây -> Hiển thị trang nhập mã CAPTCHA
 app.get('/verify-success', async (req, res) => {
     const { userid: id, token, type: linkType } = req.query;
-    
+
+    if (!id || !token || !linkType) return res.send('<h2>❌ Lỗi: Đường dẫn không hợp lệ!</h2>');
+    if (usedTokens.has(token)) return res.send('<h2>⚠️ Lỗi: Link này đã được xác nhận trước đó!</h2>');
+
+    const maxL = await getLimit(id);
+    const history = await getLinkHistory(id, linkType);
+    if (history.length >= maxL) return res.send(`<h2>⚠️ Hết lượt: Bạn đã hết lượt vượt link hôm nay (${history.length}/${maxL})!</h2>`);
+
+    // Tạo mã Captcha ngẫu nhiên 4 số
+    const captchaCode = Math.floor(1000 + Math.random() * 9000).toString();
+    pendingCaptchas.set(token, captchaCode);
+
+    // Trả về giao diện Web Captcha
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="vi">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Xác minh Captcha</title>
+            <style>
+                body { font-family: Arial, sans-serif; background: #0f172a; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                .card { background: #1e293b; padding: 30px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); text-align: center; width: 320px; }
+                .captcha-box { background: #334155; font-size: 28px; font-weight: bold; letter-spacing: 6px; padding: 10px; border-radius: 8px; margin: 15px 0; color: #38bdf8; user-select: none; }
+                input { width: 90%; padding: 12px; border: none; border-radius: 6px; text-align: center; font-size: 18px; margin-bottom: 15px; outline: none; }
+                button { width: 100%; padding: 12px; background: #22c55e; color: #fff; border: none; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.2s; }
+                button:hover { background: #16a34a; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h2>🤖 Xác minh Captcha</h2>
+                <p style="color:#94a3b8; font-size:14px;">Nhập mã bên dưới để nhận phần thưởng:</p>
+                <div class="captcha-box">${captchaCode}</div>
+                <form action="/submit-captcha" method="POST">
+                    <input type="hidden" name="userid" value="${id}">
+                    <input type="hidden" name="token" value="${token}">
+                    <input type="hidden" name="type" value="${linkType}">
+                    <input type="text" name="captcha" placeholder="Nhập 4 số ở trên" maxlength="4" required autocomplete="off">
+                    <button type="submit">XÁC NHẬN & NHẬN XU</button>
+                </form>
+            </div>
+        </body>
+        </html>
+    `);
+});
+
+// BƯỚC 2: Người dùng bấm "XÁC NHẬN" Captcha -> Kiểm tra, cộng xu, báo Discord & chuyển về Discord
+app.post('/submit-captcha', async (req, res) => {
+    const { userid: id, token, type: linkType, captcha } = req.body;
+    const realCaptcha = pendingCaptchas.get(token);
+
+    if (!token || !realCaptcha || captcha !== realCaptcha) {
+        return res.send(`
+            <div style="text-align:center;padding:50px;font-family:sans-serif;">
+                <h1 style="color:#ef4444;">❌ Mã Captcha không chính xác!</h1>
+                <a href="javascript:history.back()" style="padding:10px 20px;background:#3b82f6;color:#fff;text-decoration:none;border-radius:6px;">Thử lại</a>
+            </div>
+        `);
+    }
+
+    if (usedTokens.has(token)) {
+        return res.send('<h2 style="text-align:center;margin-top:50px;">⚠️ Link này đã được xác nhận rồi!</h2>');
+    }
+
     let typeName = 'Shrtfly';
     if (linkType === 'shrinkme') typeName = 'Shrinkme.io';
     if (linkType === 'octolinkz') typeName = 'Octolinkz';
 
-    const sendWeb = (title, msg, ok = false) => res.send(`
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <div style="text-align:center;padding:40px;font-family:sans-serif;">
-            <h1 style="color:${ok?'#2ecc71':'#e74c3c'}">${title}</h1><p>${msg}</p>
-            ${ok ? `<p><b>+${SO_XU_THUONG} Xu</b> đã được cộng vào ví của bạn!</p>` : ''}
-            <a href="https://discord.com/channels/@me" style="display:inline-block;padding:12px 24px;background:#5865F2;color:#fff;text-decoration:none;border-radius:8px;margin-top:15px;font-weight:bold;">🚀 Quay lại Discord</a>
-        </div>
-        <script>history.pushState(null,null,location.href);window.onpopstate=()=>history.go(1);</script>
-    `);
-
-    if (!id || !token || !linkType) return sendWeb('Lỗi', 'Đường dẫn không hợp lệ!');
-    if (usedTokens.has(token)) return sendWeb('⚠️ Lỗi', 'Link xác thực này đã được sử dụng!');
-    
     const maxL = await getLimit(id);
     const history = await getLinkHistory(id, linkType);
-    if (history.length >= maxL) return sendWeb('⚠️ Hết lượt', `Bạn đã hết lượt vượt link ${typeName} hôm nay (${history.length}/${maxL})!`);
 
+    if (history.length >= maxL) {
+        return res.send(`<h2 style="text-align:center;margin-top:50px;">⚠️ Bạn đã hết lượt vượt link ${typeName} hôm nay!</h2>`);
+    }
+
+    // Đánh dấu đã dùng token & lưu lịch sử
     usedTokens.add(token);
+    pendingCaptchas.delete(token);
     history.push(Date.now());
     await db.push(`/history_${linkType}/${id}`, history);
 
+    // Cộng Xu
+    const xuMoi = await addXu(id, SO_XU_THUONG);
+
+    // Gửi thông báo về Kênh Admin Discord
     try {
-        const xuMoi = await addXu(id, SO_XU_THUONG);
         const ch = await client.channels.fetch(ADMIN_CHANNEL_ID);
         if (ch) {
             const embed = new EmbedBuilder()
-                .setTitle(`🎉 VƯỢT LINK ${typeName.toUpperCase()} THÀNH CÔNG!`)
+                .setTitle(`🎉 VƯỢT LINK & CAPTCHA ${typeName.toUpperCase()} THÀNH CÔNG!`)
                 .setColor('Green')
                 .addFields(
                     { name: '👤 Người dùng', value: `<@${id}>`, inline: true },
@@ -93,8 +155,38 @@ app.get('/verify-success', async (req, res) => {
                 .setTimestamp();
             await ch.send({ embeds: [embed] });
         }
-        sendWeb('🎉 Thành Công!', `Bạn đã xác minh Captcha & vượt link ${typeName} thành công!`, true);
-    } catch (e) { res.status(500).send('Lỗi máy chủ'); }
+    } catch (e) {}
+
+    // Hiển thị thông báo thành công & Tự động chuyển hướng về Discord sau 2 giây
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="vi">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Thành Công</title>
+            <style>
+                body { font-family: Arial, sans-serif; background: #0f172a; color: #fff; text-align: center; padding-top: 80px; }
+                .box { background: #1e293b; display: inline-block; padding: 40px; border-radius: 12px; }
+                h1 { color: #22c55e; }
+                a { display: inline-block; margin-top: 15px; padding: 12px 24px; background: #5865F2; color: #fff; text-decoration: none; border-radius: 8px; font-weight: bold; }
+            </style>
+            <script>
+                setTimeout(() => {
+                    window.location.href = "https://discord.com/channels/@me";
+                }, 2000);
+            </script>
+        </head>
+        <body>
+            <div class="box">
+                <h1>🎉 XÁC MINH THÀNH CÔNG!</h1>
+                <p>Bạn đã nhận được <b>+${SO_XU_THUONG} Xu</b> vào tài khoản Discord.</p>
+                <p style="color:#94a3b8; font-size: 14px;">Đang tự động chuyển hướng về Discord trong 2 giây...</p>
+                <a href="https://discord.com/channels/@me">🚀 Mở Discord Ngay</a>
+            </div>
+        </body>
+        </html>
+    `);
 });
 
 app.get('/', (req, res) => res.send('Bot is running online!'));
@@ -146,7 +238,6 @@ client.on('interactionCreate', async i => {
         await i.deferReply({ ephemeral: true });
         const maxL = await getLimit(id);
         
-        // Đếm lượt từng link
         const hShrtfly = await getLinkHistory(id, 'shrtfly');
         const hShrinkme = await getLinkHistory(id, 'shrinkme');
         const hOctolinkz = await getLinkHistory(id, 'octolinkz');
@@ -159,7 +250,6 @@ client.on('interactionCreate', async i => {
             return i.editReply(`❌ Bạn đã dùng hết lượt cho **tất cả các link** hôm nay (Shrtfly: 0/${maxL}, Shrinkme: 0/${maxL}, Octolinkz: 0/${maxL})! Vui lòng quay lại sau 24h.`);
         }
 
-        // Tạo Token duy nhất cho lượt bấm
         const tokenShrtfly = `${Date.now()}_s_${Math.random().toString(36).substr(2, 6)}`;
         const tokenShrinkme = `${Date.now()}_sm_${Math.random().toString(36).substr(2, 6)}`;
         const tokenOctolinkz = `${Date.now()}_oct_${Math.random().toString(36).substr(2, 6)}`;
@@ -170,25 +260,21 @@ client.on('interactionCreate', async i => {
 
         let lShrtfly = '❌ Hết lượt', lShrinkme = '❌ Hết lượt', lOctolinkz = '❌ Hết lượt';
 
-        // 1. Shrtfly (Đã fix hoàn chỉnh lỗi response & alias)
+        // 1. Shrtfly
         if (remShrtfly > 0) {
             try { 
                 const aliasSF = `sf${Date.now().toString().slice(-6)}${Math.random().toString(36).substring(2, 5)}`;
                 const apiShrtfly = `https://shrtfly.com/api?api=${SHRTFLY_API_KEY}&type=1&url=${encodeURIComponent(targetShrtfly)}&alias=${aliasSF}&format=json`;
-                
                 const r = await axios.get(apiShrtfly); 
                 
                 if (r.data && (r.data.shortenedUrl || r.data.url || r.data.result?.shorten_url)) {
                     lShrtfly = r.data.shortenedUrl || r.data.url || r.data.result.shorten_url;
                 } else {
-                    // Fallback nếu có sự cố alias
                     const fallbackApi = `https://shrtfly.com/api?api=${SHRTFLY_API_KEY}&type=1&url=${encodeURIComponent(targetShrtfly)}&format=json`;
                     const rFallback = await axios.get(fallbackApi);
                     lShrtfly = rFallback.data?.shortenedUrl || rFallback.data?.url || 'Lỗi tạo link';
                 }
-            } catch (e) { 
-                lShrtfly = 'Lỗi kết nối Shrtfly'; 
-            }
+            } catch (e) { lShrtfly = 'Lỗi kết nối Shrtfly'; }
         }
 
         // 2. Shrinkme.io
@@ -196,7 +282,6 @@ client.on('interactionCreate', async i => {
             try { 
                 const aliasSM = `sm_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
                 const apiShrinkme = `https://shrinkme.io/api?api=${SHRINKME_API_KEY}&url=${encodeURIComponent(targetShrinkme)}&alias=${aliasSM}`;
-                
                 const r = await axios.get(apiShrinkme); 
                 lShrinkme = r.data?.shortenedUrl || r.data?.shorten_url || r.data?.url || 'Lỗi link'; 
             } catch { lShrinkme = 'Lỗi kết nối'; }
@@ -207,7 +292,6 @@ client.on('interactionCreate', async i => {
             try { 
                 const aliasOCT = `oct_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
                 const apiOctolinkz = `https://octolinkz.com/api?api=${OCTOLINKZ_API_KEY}&url=${encodeURIComponent(targetOctolinkz)}&alias=${aliasOCT}`;
-                
                 const r = await axios.get(apiOctolinkz); 
                 lOctolinkz = r.data?.shortenedUrl || r.data?.shorten_url || r.data?.url || 'Lỗi link'; 
             } catch { lOctolinkz = 'Lỗi kết nối'; }
