@@ -23,7 +23,7 @@ const OCTOLINKZ_API_KEY = process.env.OCTOLINKZ_API_KEY || "c29d86aeeebb654a71cf
 const SO_XU_THUONG = 100;
 const GIOI_HAN_MAC_DINH = 3;
 const usedTokens = new Set();
-const pendingCaptchas = new Map(); // Lưu mã Captcha tạm thời
+const pendingCaptchas = new Map();
 
 // Helper Functions
 async function getXu(id) { try { return await db.getData(`/xu/${id}`) || 0; } catch { return 0; } }
@@ -51,7 +51,7 @@ async function checkIsAdmin(member, userId) {
     }
 }
 
-// BƯỚC 1: Link vượt QC dẫn về đây -> Hiển thị trang nhập mã CAPTCHA
+// BƯỚC 1: TRANG ĐÍCH XÁC MINH CAPTCHA (Sau khi vượt xong QC mới nhảy vào đây)
 app.get('/verify-success', async (req, res) => {
     const { userid: id, token, type: linkType } = req.query;
 
@@ -66,14 +66,13 @@ app.get('/verify-success', async (req, res) => {
     const captchaCode = Math.floor(1000 + Math.random() * 9000).toString();
     pendingCaptchas.set(token, captchaCode);
 
-    // Trả về giao diện Web Captcha
     res.send(`
         <!DOCTYPE html>
         <html lang="vi">
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Xác minh Captcha</title>
+            <title>Xác minh nhận thưởng</title>
             <style>
                 body { font-family: Arial, sans-serif; background: #0f172a; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
                 .card { background: #1e293b; padding: 30px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); text-align: center; width: 320px; }
@@ -86,7 +85,7 @@ app.get('/verify-success', async (req, res) => {
         <body>
             <div class="card">
                 <h2>🤖 Xác minh Captcha</h2>
-                <p style="color:#94a3b8; font-size:14px;">Nhập mã bên dưới để nhận phần thưởng:</p>
+                <p style="color:#94a3b8; font-size:14px;">Bạn đã vượt link thành công! Nhập mã bên dưới để nhận phần thưởng:</p>
                 <div class="captcha-box">${captchaCode}</div>
                 <form action="/submit-captcha" method="POST">
                     <input type="hidden" name="userid" value="${id}">
@@ -101,7 +100,7 @@ app.get('/verify-success', async (req, res) => {
     `);
 });
 
-// BƯỚC 2: Người dùng bấm "XÁC NHẬN" Captcha -> Kiểm tra, cộng xu, báo Discord & chuyển về Discord
+// BƯỚC 2: Nhập đúng Captcha -> Cộng xu + Báo Discord + Chuyển về Discord
 app.post('/submit-captcha', async (req, res) => {
     const { userid: id, token, type: linkType, captcha } = req.body;
     const realCaptcha = pendingCaptchas.get(token);
@@ -130,16 +129,13 @@ app.post('/submit-captcha', async (req, res) => {
         return res.send(`<h2 style="text-align:center;margin-top:50px;">⚠️ Bạn đã hết lượt vượt link ${typeName} hôm nay!</h2>`);
     }
 
-    // Đánh dấu đã dùng token & lưu lịch sử
     usedTokens.add(token);
     pendingCaptchas.delete(token);
     history.push(Date.now());
     await db.push(`/history_${linkType}/${id}`, history);
 
-    // Cộng Xu
     const xuMoi = await addXu(id, SO_XU_THUONG);
 
-    // Gửi thông báo về Kênh Admin Discord
     try {
         const ch = await client.channels.fetch(ADMIN_CHANNEL_ID);
         if (ch) {
@@ -157,7 +153,6 @@ app.post('/submit-captcha', async (req, res) => {
         }
     } catch (e) {}
 
-    // Hiển thị thông báo thành công & Tự động chuyển hướng về Discord sau 2 giây
     res.send(`
         <!DOCTYPE html>
         <html lang="vi">
@@ -192,32 +187,25 @@ app.post('/submit-captcha', async (req, res) => {
 app.get('/', (req, res) => res.send('Bot is running online!'));
 app.listen(process.env.PORT || 3000);
 
-// Danh sách Slash Commands
+// Slash Commands
 const commands = [
     new SlashCommandBuilder().setName('getlink').setDescription('Lấy link vượt quảng cáo nhận xu (Shrtfly, Shrinkme & Octolinkz)'),
-    
     new SlashCommandBuilder().setName('xemxu').setDescription('Xem số xu của bản thân hoặc người khác')
         .addUserOption(o => o.setName('user').setDescription('Chọn người muốn xem (để trống nếu xem của mình)').setRequired(false)),
-    
     new SlashCommandBuilder().setName('doithuong').setDescription('Đổi xu lấy phần thưởng')
         .addStringOption(o => o.setName('tenqua').setDescription('Tên món quà').setRequired(true))
         .addIntegerOption(o => o.setName('giazxu').setDescription('Số xu cần đổi').setRequired(true)),
-    
     new SlashCommandBuilder().setName('congxu').setDescription('[ADMIN/MOD] Cộng xu')
         .addUserOption(o => o.setName('user').setDescription('Thành viên').setRequired(true))
         .addIntegerOption(o => o.setName('soxu').setDescription('Số xu cộng').setRequired(true)),
-    
     new SlashCommandBuilder().setName('truxu').setDescription('[ADMIN/MOD] Trừ xu')
         .addUserOption(o => o.setName('user').setDescription('Thành viên').setRequired(true))
         .addIntegerOption(o => o.setName('soxu').setDescription('Số xu trừ').setRequired(true)),
-    
     new SlashCommandBuilder().setName('setgioihan').setDescription('[ADMIN/MOD] Set giới hạn lượt vượt/ngày')
         .addUserOption(o => o.setName('user').setDescription('Thành viên').setRequired(true))
         .addIntegerOption(o => o.setName('soluot').setDescription('Số lượt tối đa').setRequired(true)),
-
     new SlashCommandBuilder().setName('themadmin').setDescription('[CHỦ BOT/ADMIN] Thêm người phụ quản lý Bot')
         .addUserOption(o => o.setName('user').setDescription('Thành viên muốn cấp quyền').setRequired(true)),
-
     new SlashCommandBuilder().setName('xoadmin').setDescription('[CHỦ BOT/ADMIN] Xóa quyền Admin/Mod')
         .addUserOption(o => o.setName('user').setDescription('Thành viên muốn gỡ quyền').setRequired(true))
 ];
@@ -233,7 +221,6 @@ client.on('interactionCreate', async i => {
     const id = i.user.id;
     const isAdmin = await checkIsAdmin(i.member, id);
 
-    // 1. Lệnh Getlink
     if (i.commandName === 'getlink') {
         await i.deferReply({ ephemeral: true });
         const maxL = await getLimit(id);
@@ -268,11 +255,11 @@ client.on('interactionCreate', async i => {
                 const r = await axios.get(apiShrtfly); 
                 
                 if (r.data && (r.data.shortenedUrl || r.data.url || r.data.result?.shorten_url)) {
-                    lShrtfly = r.data.shortenedUrl || r.data.url || r.data.result.shorten_url;
+                    lShrtfly = `<${r.data.shortenedUrl || r.data.url || r.data.result.shorten_url}>`;
                 } else {
                     const fallbackApi = `https://shrtfly.com/api?api=${SHRTFLY_API_KEY}&type=1&url=${encodeURIComponent(targetShrtfly)}&format=json`;
                     const rFallback = await axios.get(fallbackApi);
-                    lShrtfly = rFallback.data?.shortenedUrl || rFallback.data?.url || 'Lỗi tạo link';
+                    lShrtfly = `<${rFallback.data?.shortenedUrl || rFallback.data?.url}>`;
                 }
             } catch (e) { lShrtfly = 'Lỗi kết nối Shrtfly'; }
         }
@@ -283,17 +270,19 @@ client.on('interactionCreate', async i => {
                 const aliasSM = `sm_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
                 const apiShrinkme = `https://shrinkme.io/api?api=${SHRINKME_API_KEY}&url=${encodeURIComponent(targetShrinkme)}&alias=${aliasSM}`;
                 const r = await axios.get(apiShrinkme); 
-                lShrinkme = r.data?.shortenedUrl || r.data?.shorten_url || r.data?.url || 'Lỗi link'; 
+                const resUrl = r.data?.shortenedUrl || r.data?.shorten_url || r.data?.url;
+                lShrinkme = resUrl ? `<${resUrl}>` : 'Lỗi link'; 
             } catch { lShrinkme = 'Lỗi kết nối'; }
         }
 
-        // 3. Octolinkz
+        // 3. Octolinkz (Fix lỗi API Octolinkz)
         if (remOctolinkz > 0) {
             try { 
                 const aliasOCT = `oct_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
                 const apiOctolinkz = `https://octolinkz.com/api?api=${OCTOLINKZ_API_KEY}&url=${encodeURIComponent(targetOctolinkz)}&alias=${aliasOCT}`;
                 const r = await axios.get(apiOctolinkz); 
-                lOctolinkz = r.data?.shortenedUrl || r.data?.shorten_url || r.data?.url || 'Lỗi link'; 
+                const resUrl = r.data?.shortenedUrl || r.data?.shorten_url || r.data?.url;
+                lOctolinkz = resUrl ? `<${resUrl}>` : 'Lỗi link'; 
             } catch { lOctolinkz = 'Lỗi kết nối'; }
         }
 
@@ -305,7 +294,6 @@ client.on('interactionCreate', async i => {
         await i.editReply(msg);
     }
 
-    // 2. Lệnh Xem Xu
     if (i.commandName === 'xemxu') {
         const targetUser = i.options.getUser('user') || i.user;
         const xu = await getXu(targetUser.id);
@@ -325,7 +313,6 @@ client.on('interactionCreate', async i => {
         }
     }
 
-    // 3. Lệnh Đổi Thưởng
     if (i.commandName === 'doithuong') {
         const q = i.options.getString('tenqua'), g = i.options.getInteger('giazxu'), xu = await getXu(id);
         if (xu < g) return i.reply({ content: `❌ Không đủ xu! Bạn có **${xu} xu**, cần **${g} xu**.`, ephemeral: true });
@@ -337,7 +324,6 @@ client.on('interactionCreate', async i => {
         } catch {}
     }
 
-    // Các lệnh Admin / Mod
     if (['congxu', 'truxu', 'setgioihan', 'themadmin', 'xoadmin'].includes(i.commandName)) {
         if (!isAdmin) return i.reply({ content: '❌ Bạn không có quyền Admin/Mod!', ephemeral: true });
 
