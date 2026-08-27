@@ -170,15 +170,25 @@ client.on('interactionCreate', async i => {
 
         let lShrtfly = '❌ Hết lượt', lShrinkme = '❌ Hết lượt', lOctolinkz = '❌ Hết lượt';
 
-        // 1. Shrtfly
+        // 1. Shrtfly (Đã fix hoàn chỉnh lỗi response & alias)
         if (remShrtfly > 0) {
             try { 
-                const aliasSF = `sf_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+                const aliasSF = `sf${Date.now().toString().slice(-6)}${Math.random().toString(36).substring(2, 5)}`;
                 const apiShrtfly = `https://shrtfly.com/api?api=${SHRTFLY_API_KEY}&type=1&url=${encodeURIComponent(targetShrtfly)}&alias=${aliasSF}&format=json`;
                 
                 const r = await axios.get(apiShrtfly); 
-                lShrtfly = r.data?.result?.shorten_url || r.data?.shorten_url || r.data?.url || 'Lỗi link'; 
-            } catch { lShrtfly = 'Lỗi kết nối'; }
+                
+                if (r.data && (r.data.shortenedUrl || r.data.url || r.data.result?.shorten_url)) {
+                    lShrtfly = r.data.shortenedUrl || r.data.url || r.data.result.shorten_url;
+                } else {
+                    // Fallback nếu có sự cố alias
+                    const fallbackApi = `https://shrtfly.com/api?api=${SHRTFLY_API_KEY}&type=1&url=${encodeURIComponent(targetShrtfly)}&format=json`;
+                    const rFallback = await axios.get(fallbackApi);
+                    lShrtfly = rFallback.data?.shortenedUrl || rFallback.data?.url || 'Lỗi tạo link';
+                }
+            } catch (e) { 
+                lShrtfly = 'Lỗi kết nối Shrtfly'; 
+            }
         }
 
         // 2. Shrinkme.io
