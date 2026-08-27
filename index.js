@@ -11,18 +11,19 @@ const TOKEN_BOT = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const ADMIN_CHANNEL_ID = process.env.ADMIN_CHANNEL_ID;
 const OWNER_ID = process.env.OWNER_ID || "";
+const SHRINKME_API_KEY = process.env.SHRINKME_API_KEY || "YOUR_SHRINKME_API_KEY";
 
 const SO_XU_THUONG = 100;
-const GIOI_HAN_MAC_DINH = 3; // Mặc định 3 lượt / 1 loại link / 24h
+const GIOI_HAN_MAC_DINH = 3; // Mặc định 3 lượt / loại link / 24h
 const usedTokens = new Set();
 
-// Helper Database
+// Helper Functions
 async function getXu(id) { try { return await db.getData(`/xu/${id}`) || 0; } catch { return 0; } }
 async function addXu(id, amt) { const t = (await getXu(id)) + amt; await db.push(`/xu/${id}`, t); return t; }
 async function getLimit(id) { try { return await db.getData(`/limit/${id}`) || GIOI_HAN_MAC_DINH; } catch { return GIOI_HAN_MAC_DINH; } }
 async function setLimit(id, max) { await db.push(`/limit/${id}`, max); }
 
-// Lấy lịch sửượt link của riêng từng loại link (shrtfly / uptolink)
+// Lấy lịch sử vượt link của riêng từng loại link (shrtfly / shrinkme)
 async function getLinkHistory(id, linkType) {
     try {
         const h = await db.getData(`/history_${linkType}/${id}`) || [], now = Date.now();
@@ -46,7 +47,7 @@ async function checkIsAdmin(member, userId) {
 // Xử lý khi Vượt Captcha + Vượt Link thành công
 app.get('/verify-success', async (req, res) => {
     const { userid: id, token, type: linkType } = req.query;
-    const typeName = linkType === 'shrtfly' ? 'Shrtfly' : 'Uptolink';
+    const typeName = linkType === 'shrtfly' ? 'Shrtfly' : 'Shrinkme.io';
 
     const sendWeb = (title, msg, ok = false) => res.send(`
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -92,9 +93,9 @@ app.get('/verify-success', async (req, res) => {
 app.get('/', (req, res) => res.send('Bot is running online!'));
 app.listen(process.env.PORT || 3000);
 
-// Danh sách lệnh Slash
+// Danh sách Slash Commands
 const commands = [
-    new SlashCommandBuilder().setName('getlink').setDescription('Lấy link vượt quảng cáo nhận xu (Shrtfly & Uptolink)'),
+    new SlashCommandBuilder().setName('getlink').setDescription('Lấy link vượt quảng cáo nhận xu (Shrtfly & Shrinkme.io)'),
     
     new SlashCommandBuilder().setName('xemxu').setDescription('Xem số xu của bản thân hoặc người khác')
         .addUserOption(o => o.setName('user').setDescription('Chọn người muốn xem (để trống nếu xem của mình)').setRequired(false)),
@@ -140,61 +141,68 @@ client.on('interactionCreate', async i => {
         
         // Đếm lượt từng link
         const hShrtfly = await getLinkHistory(id, 'shrtfly');
-        const hUptolink = await getLinkHistory(id, 'uptolink');
+        const hShrinkme = await getLinkHistory(id, 'shrinkme');
 
         const remShrtfly = Math.max(0, maxL - hShrtfly.length);
-        const remUptolink = Math.max(0, maxL - hUptolink.length);
+        const remShrinkme = Math.max(0, maxL - hShrinkme.length);
 
-        if (remShrtfly <= 0 && remUptolink <= 0) {
-            return i.editReply(`❌ Bạn đã dùng hết lượt cho **cả 2 link** hôm nay (Shrtfly: 0/${maxL}, Uptolink: 0/${maxL})! Vui lòng quay lại sau 24h.`);
+        if (remShrtfly <= 0 && remShrinkme <= 0) {
+            return i.editReply(`❌ Bạn đã dùng hết lượt cho **cả 2 link** hôm nay (Shrtfly: 0/${maxL}, Shrinkme: 0/${maxL})! Vui lòng quay lại sau 24h.`);
         }
 
-        const tokenShrtfly = `${Date.now()}_s_${Math.random().toString(36).substr(2, 5)}`;
-        const tokenUptolink = `${Date.now()}_u_${Math.random().toString(36).substr(2, 5)}`;
+        // Tạo Token duy nhất cho lượt bấm
+        const tokenShrtfly = `${Date.now()}_s_${Math.random().toString(36).substr(2, 6)}`;
+        const tokenShrinkme = `${Date.now()}_sm_${Math.random().toString(36).substr(2, 6)}`;
 
         const targetShrtfly = `${process.env.RENDER_EXTERNAL_URL}/verify-success?userid=${id}&token=${tokenShrtfly}&type=shrtfly`;
-        const targetUptolink = `${process.env.RENDER_EXTERNAL_URL}/verify-success?userid=${id}&token=${tokenUptolink}&type=uptolink`;
+        const targetShrinkme = `${process.env.RENDER_EXTERNAL_URL}/verify-success?userid=${id}&token=${tokenShrinkme}&type=shrinkme`;
 
-        let lShrtfly = '❌ Hết lượt', lUptolink = '❌ Hết lượt';
+        let lShrtfly = '❌ Hết lượt', lShrinkme = '❌ Hết lượt';
 
-        // Tạo link Shrtfly nếu còn lượt
+        // Tạo Link Shrtfly ngẫu nhiên hoàn toàn (Tạo alias ngẫu nhiên không đụng hàng)
         if (remShrtfly > 0) {
             try { 
-                const r = await axios.get(`https://shrtfly.com/api?api=27ec1b82df0ebcd873cfdaf23204be70&type=1&url=${encodeURIComponent(targetShrtfly)}`); 
+                const randomAliasSF = `sf_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+                const apiShrtfly = `https://shrtfly.com/api?api=27ec1b82df0ebcd873cfdaf23204be70&url=${encodeURIComponent(targetShrtfly)}&alias=${randomAliasSF}`;
+                
+                const r = await axios.get(apiShrtfly); 
                 lShrtfly = r.data?.result?.shorten_url || r.data?.shorten_url || r.data?.url || 'Lỗi link'; 
             } catch { lShrtfly = 'Lỗi kết nối'; }
         }
 
-        // Tạo link Uptolink nếu còn lượt
-        if (remUptolink > 0) {
+        // Tạo Link Shrinkme.io ngẫu nhiên hoàn toàn (Tạo alias ngẫu nhiên không đụng hàng)
+        if (remShrinkme > 0) {
             try { 
-                const r = await axios.get(`https://uptolink.com/api?api=YOUR_UPTOLINK_API_KEY&url=${encodeURIComponent(targetUptolink)}`); 
-                lUptolink = r.data?.shortenedUrl || r.data?.shorten_url || r.data?.url || 'Lỗi link'; 
-            } catch { lUptolink = 'Lỗi kết nối'; }
+                const randomAliasSM = `sm_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+                const apiShrinkme = `https://shrinkme.io/api?api=${SHRINKME_API_KEY}&url=${encodeURIComponent(targetShrinkme)}&alias=${randomAliasSM}`;
+                
+                const r = await axios.get(apiShrinkme); 
+                lShrinkme = r.data?.shortenedUrl || r.data?.shorten_url || r.data?.url || 'Lỗi link'; 
+            } catch { lShrinkme = 'Lỗi kết nối'; }
         }
 
-        const msg = `🔗 **DANH SÁCH LINK VƯỢT QC KHÁC NHAU (+${SO_XU_THUONG} xu/lần):**\n\n` +
+        const msg = `🔗 **DANH SÁCH LINK VƯỢT QC NGẪU NHIÊN (+${SO_XU_THUONG} xu/lần):**\n\n` +
                     `1️⃣ **Link Shrtfly** *(Còn ${remShrtfly}/${maxL} lượt)*:\n${remShrtfly > 0 ? lShrtfly : '🚫 *Đã hết lượt hôm nay*'}\n\n` +
-                    `2️⃣ **Link Uptolink** *(Còn ${remUptolink}/${maxL} lượt)*:\n${remUptolink > 0 ? lUptolink : '🚫 *Đã hết lượt hôm nay*'}`;
+                    `2️⃣ **Link Shrinkme.io** *(Còn ${remShrinkme}/${maxL} lượt)*:\n${remShrinkme > 0 ? lShrinkme : '🚫 *Đã hết lượt hôm nay*'}`;
 
         await i.editReply(msg);
     }
 
-    // 2. Lệnh Xem Xu (Xem bản thân hoặc người khác)
+    // 2. Lệnh Xem Xu
     if (i.commandName === 'xemxu') {
         const targetUser = i.options.getUser('user') || i.user;
         const xu = await getXu(targetUser.id);
         const maxL = await getLimit(targetUser.id);
         const hS = await getLinkHistory(targetUser.id, 'shrtfly');
-        const hU = await getLinkHistory(targetUser.id, 'uptolink');
+        const hSM = await getLinkHistory(targetUser.id, 'shrinkme');
         
         const remS = Math.max(0, maxL - hS.length);
-        const remU = Math.max(0, maxL - hU.length);
+        const remSM = Math.max(0, maxL - hSM.length);
 
         if (targetUser.id === i.user.id) {
-            await i.reply({ content: `💰 Bạn có **${xu} xu**!\n📊 Lượt còn hôm nay: **Shrtfly (${remS}/${maxL})** | **Uptolink (${remU}/${maxL})**.`, ephemeral: true });
+            await i.reply({ content: `💰 Bạn có **${xu} xu**!\n📊 Lượt còn hôm nay: **Shrtfly (${remS}/${maxL})** | **Shrinkme.io (${remSM}/${maxL})**.`, ephemeral: true });
         } else {
-            await i.reply({ content: `💰 Thành viên <@${targetUser.id}> có **${xu} xu** (Lượt còn: Shrtfly ${remS}/${maxL} | Uptolink ${remU}/${maxL}).` });
+            await i.reply({ content: `💰 Thành viên <@${targetUser.id}> có **${xu} xu** (Lượt còn: Shrtfly ${remS}/${maxL} | Shrinkme.io ${remSM}/${maxL}).` });
         }
     }
 
