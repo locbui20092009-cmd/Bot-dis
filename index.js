@@ -301,23 +301,30 @@ client.on('interactionCreate', async i => {
 
     if (i.commandName === 'xemxu') {
         setImmediate(async () => {
-            const targetUser = i.options.getUser('user') || i.user;
-            const xu = await getXu(targetUser.id);
-            const maxL = await getLimit(targetUser.id);
+            const targetUser = i.options.getUser('user');
+
+            // Kiểm tra: Nếu xem xu người khác mà không phải Admin/Mod thì chặn
+            if (targetUser && targetUser.id !== i.user.id && !isAdmin) {
+                return await i.editReply('❌ Bạn không có quyền xem số xu của người khác!');
+            }
+
+            const userToCheck = targetUser || i.user;
+            const xu = await getXu(userToCheck.id);
+            const maxL = await getLimit(userToCheck.id);
             const [hS, hSM, hOCT] = await Promise.all([
-                getLinkHistory(targetUser.id, 'shrtfly'),
-                getLinkHistory(targetUser.id, 'shrinkme'),
-                getLinkHistory(targetUser.id, 'octolinkz')
+                getLinkHistory(userToCheck.id, 'shrtfly'),
+                getLinkHistory(userToCheck.id, 'shrinkme'),
+                getLinkHistory(userToCheck.id, 'octolinkz')
             ]);
             
             const remS = Math.max(0, maxL - hS.length);
             const remSM = Math.max(0, maxL - hSM.length);
             const remOCT = Math.max(0, maxL - hOCT.length);
 
-            if (targetUser.id === i.user.id) {
+            if (userToCheck.id === i.user.id) {
                 await i.editReply(`💰 Bạn có **${xu} xu**!\n📊 Lượt còn hôm nay: **Shrtfly (${remS}/${maxL})** | **Shrinkme (${remSM}/${maxL})** | **Octolinkz (${remOCT}/${maxL})**.`);
             } else {
-                await i.editReply(`💰 Thành viên <@${targetUser.id}> có **${xu} xu** (Shrtfly: ${remS}/${maxL} | Shrinkme: ${remSM}/${maxL} | Octolinkz: ${remOCT}/${maxL}).`);
+                await i.editReply(`💰 Thành viên <@${userToCheck.id}> có **${xu} xu** (Shrtfly: ${remS}/${maxL} | Shrinkme: ${remSM}/${maxL} | Octolinkz: ${remOCT}/${maxL}).`);
             }
         });
     }
