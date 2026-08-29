@@ -10,10 +10,28 @@ const {
 
 const express = require('express');
 const axios = require('axios');
+const path = require('path');
 const { JsonDB, Config } = require('node-json-db');
 
+// =========================
+// DATABASE
+// =========================
+
+// Render Persistent Disk:
+// Mount Path: /data
+//
+// Environment Variable:
+// DB_PATH=/data/database
+//
+// Nếu chạy local mà không có DB_PATH,
+// database sẽ được lưu trong thư mục database.
+
+const DB_PATH =
+    process.env.DB_PATH ||
+    path.join(__dirname, 'database');
+
 const db = new JsonDB(
-    new Config('database', true, false, '/')
+    new Config(DB_PATH, true, false, '/')
 );
 
 const client = new Client({
@@ -57,7 +75,13 @@ const pendingCaptchas = new Map();
 
 async function getXu(id) {
     try {
-        return await db.getData(`/xu/${id}`) || 0;
+        const data = await db.getData(`/xu/${id}`);
+
+        if (typeof data !== 'number') {
+            return 0;
+        }
+
+        return data;
     } catch {
         return 0;
     }
@@ -184,9 +208,13 @@ app.get('/verify-success', async (req, res) => {
 <!DOCTYPE html>
 <html lang="vi">
 <head>
+
 <meta charset="UTF-8">
-<meta name="viewport"
-content="width=device-width, initial-scale=1.0">
+
+<meta
+name="viewport"
+content="width=device-width, initial-scale=1.0"
+>
 
 <title>Xác minh</title>
 
@@ -278,6 +306,7 @@ button:hover {
 }
 
 </style>
+
 </head>
 
 <body>
@@ -1107,10 +1136,6 @@ client.on(
                 }
 
                 // OCTOLINKZ
-                //
-                // Giữ request theo endpoint API
-                // đang có trong code gốc.
-                //
 
                 if (
                     remOCT > 0 &&
@@ -1665,21 +1690,27 @@ client.on(
 // =========================
 
 if (!TOKEN_BOT) {
+
     console.error(
         '❌ Thiếu biến môi trường TOKEN'
     );
+
 } else {
 
     client.login(TOKEN_BOT)
         .then(() => {
+
             console.log(
                 'Đang đăng nhập Discord...'
             );
+
         })
         .catch(error => {
+
             console.error(
                 '❌ Discord login error:',
                 error
             );
+
         });
 }
