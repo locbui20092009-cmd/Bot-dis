@@ -35,7 +35,7 @@ async function getLinkHistory(id, linkType) {
     try {
         const h = await db.getData(`/history_${linkType}/${id}`) || [], now = Date.now();
         const valid = h.filter(t => (now - t) < 86400000);
-        await db.push(`/history_${linkType}/${id}`, valid); 
+        await db.push(`/history_${linkType}/${id}`, valid);
         return valid;
     } catch { return []; }
 }
@@ -97,7 +97,7 @@ app.get('/verify-success', async (req, res) => {
     `);
 });
 
-// BƯỚC 2: XÁC NHẬN CAPTCHA -> THÔNG BÁO ADMIN (KHÔNG CỘNG XU TỰ ĐỘNG)
+// BƯỚC 2: XÁC NHẬN CAPTCHA -> THÔNG BÁO ADMIN
 app.post('/submit-captcha', async (req, res) => {
     const { userid: id, token, type: linkType, captcha } = req.body;
     const realCaptcha = pendingCaptchas.get(token);
@@ -129,15 +129,24 @@ app.post('/submit-captcha', async (req, res) => {
     history.push(Date.now());
     await db.push(`/history_${linkType}/${id}`, history);
 
-    // Gửi thông báo về kênh Admin Discord
+    // Gửi thông báo về kênh Admin Discord (Có Fetch Tên Discord)
     try {
         const ch = await client.channels.fetch(ADMIN_CHANNEL_ID);
         if (ch) {
+            let userDisplay = `<@${id}>`;
+            try {
+                const userObj = await client.users.fetch(id);
+                if (userObj) {
+                    const name = userObj.globalName || userObj.username;
+                    userDisplay = `**${name}** (<@${id}>)`;
+                }
+            } catch (e) {}
+
             const embed = new EmbedBuilder()
                 .setTitle(`🔔 NGƯỜI DÙNG VƯỢT LINK & HOÀN THÀNH CAPTCHA!`)
                 .setColor('Yellow')
                 .addFields(
-                    { name: '👤 Người dùng', value: `<@${id}>`, inline: true },
+                    { name: '👤 Người dùng', value: userDisplay, inline: true },
                     { name: '🔗 Loại link', value: typeName, inline: true },
                     { name: `📊 Lượt ${typeName} hôm nay`, value: `${history.length}/${maxL}`, inline: true },
                     { name: '⚠️ Trạng thái', value: 'Đã nhập đúng Captcha. Vui lòng kiểm tra và cộng xu bằng lệnh `/congxu`', inline: false }
@@ -204,8 +213,8 @@ const commands = [
 
 client.on('ready', async () => {
     const rest = new REST({ version: '10' }).setToken(TOKEN_BOT);
-    try { 
-        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands }); 
+    try {
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
         console.log(`Bot Online & Dang ky slash commands thanh cong: ${client.user.tag}`);
     } catch (e) {
         console.error("Loi dang ky Slash Commands:", e);
@@ -216,7 +225,6 @@ client.on('ready', async () => {
 client.on('interactionCreate', async i => {
     if (!i.isChatInputCommand()) return;
 
-    // PHẢN HỒI LẬP TỨC CHO DISCORD TRÁNH TIMEOUT 3 GiÂY
     try {
         await i.deferReply({ flags: 64 });
     } catch (err) {
@@ -228,7 +236,6 @@ client.on('interactionCreate', async i => {
     const isAdmin = await checkIsAdmin(i.member, id);
 
     if (i.commandName === 'getlink') {
-        // Thực hiện xử lý bất đồng bộ
         setImmediate(async () => {
             try {
                 const maxL = await getLimit(id);
@@ -303,7 +310,6 @@ client.on('interactionCreate', async i => {
         setImmediate(async () => {
             const targetUser = i.options.getUser('user');
 
-            // Kiểm tra: Nếu xem xu người khác mà không phải Admin/Mod thì chặn
             if (targetUser && targetUser.id !== i.user.id && !isAdmin) {
                 return await i.editReply('❌ Bạn không có quyền xem số xu của người khác!');
             }
@@ -316,7 +322,7 @@ client.on('interactionCreate', async i => {
                 getLinkHistory(userToCheck.id, 'shrinkme'),
                 getLinkHistory(userToCheck.id, 'octolinkz')
             ]);
-            
+
             const remS = Math.max(0, maxL - hS.length);
             const remSM = Math.max(0, maxL - hSM.length);
             const remOCT = Math.max(0, maxL - hOCT.length);
