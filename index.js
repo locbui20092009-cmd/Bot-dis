@@ -1,1716 +1,400 @@
-const {
-    Client,
-    GatewayIntentBits,
-    SlashCommandBuilder,
-    REST,
-    Routes,
-    EmbedBuilder,
-    PermissionFlagsBits
-} = require('discord.js');
-
+const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 const express = require('express');
 const axios = require('axios');
-const path = require('path');
 const { JsonDB, Config } = require('node-json-db');
 
-// =========================
-// DATABASE
-// =========================
-
-// Render Persistent Disk:
-// Mount Path: /data
-//
-// Environment Variable:
-// DB_PATH=/data/database
-//
-// Nếu chạy local mà không có DB_PATH,
-// database sẽ được lưu trong thư mục database.
-
-const DB_PATH =
-    process.env.DB_PATH ||
-    path.join(__dirname, 'database');
-
-const db = new JsonDB(
-    new Config(DB_PATH, true, false, '/')
-);
-
-const client = new Client({
-    intents: [GatewayIntentBits.Guilds]
-});
-
+const db = new JsonDB(new Config("database", true, false, '/'));
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const app = express();
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// =========================
-// ENV
-// =========================
-
 const TOKEN_BOT = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const ADMIN_CHANNEL_ID = process.env.ADMIN_CHANNEL_ID;
-const OWNER_ID = process.env.OWNER_ID || '';
+const OWNER_ID = process.env.OWNER_ID || "";
 
-const SHRTFLY_API_KEY = process.env.SHRTFLY_API_KEY || '';
-const SHRINKME_API_KEY = process.env.SHRINKME_API_KEY || '';
-const OCTOLINKZ_API_KEY = process.env.OCTOLINKZ_API_KEY || '';
+// API Keys
+const SHRTFLY_API_KEY = process.env.SHRTFLY_API_KEY || "27ec1b82df0ebcd873cfdaf23204be70";
+const SHRINKME_API_KEY = process.env.SHRINKME_API_KEY || "bbfe266096d2604965ff23d654e8c3dc6d6c5d35";
+const OCTOLINKZ_API_KEY = process.env.OCTOLINKZ_API_KEY || "c29d86aeeebb654a71cf856db9955ac94ec09385";
 
-const RENDER_URL =
-    process.env.RENDER_EXTERNAL_URL ||
-    'https://your-app.onrender.com';
-
-// =========================
-// CONFIG
-// =========================
-
+const SO_XU_THUONG = 100;
 const GIOI_HAN_MAC_DINH = 3;
-
 const usedTokens = new Set();
 const pendingCaptchas = new Map();
 
-// =========================
-// DATABASE HELPERS
-// =========================
-
-async function getXu(id) {
-    try {
-        const data = await db.getData(`/xu/${id}`);
-
-        if (typeof data !== 'number') {
-            return 0;
-        }
-
-        return data;
-    } catch {
-        return 0;
-    }
-}
-
-async function addXu(id, amount) {
-    const current = await getXu(id);
-    const total = current + amount;
-
-    await db.push(`/xu/${id}`, total);
-
-    return total;
-}
-
-async function getLimit(id) {
-    try {
-        return await db.getData(`/limit/${id}`) || GIOI_HAN_MAC_DINH;
-    } catch {
-        return GIOI_HAN_MAC_DINH;
-    }
-}
-
-async function setLimit(id, max) {
-    await db.push(`/limit/${id}`, max);
-}
+// Helpers
+async function getXu(id) { try { return await db.getData(`/xu/${id}`) || 0; } catch { return 0; } }
+async function addXu(id, amt) { const t = (await getXu(id)) + amt; await db.push(`/xu/${id}`, t); return t; }
+async function getLimit(id) { try { return await db.getData(`/limit/${id}`) || GIOI_HAN_MAC_DINH; } catch { return GIOI_HAN_MAC_DINH; } }
+async function setLimit(id, max) { await db.push(`/limit/${id}`, max); }
 
 async function getLinkHistory(id, linkType) {
     try {
-        const history =
-            await db.getData(`/history_${linkType}/${id}`) || [];
-
-        const now = Date.now();
-
-        const valid = history.filter(
-            time => (now - time) < 86400000
-        );
-
-        await db.push(
-            `/history_${linkType}/${id}`,
-            valid
-        );
-
+        const h = await db.getData(`/history_${linkType}/${id}`) || [], now = Date.now();
+        const valid = h.filter(t => (now - t) < 86400000);
+        await db.push(`/history_${linkType}/${id}`, valid);
         return valid;
-    } catch {
-        return [];
-    }
+    } catch { return []; }
 }
-
-// =========================
-// ADMIN CHECK
-// =========================
 
 async function checkIsAdmin(member, userId) {
-
-    if (userId === OWNER_ID) {
-        return true;
-    }
-
-    if (
-        member &&
-        member.permissions &&
-        member.permissions.has(PermissionFlagsBits.ManageGuild)
-    ) {
-        return true;
-    }
-
+    if (userId === OWNER_ID) return true;
+    if (member && member.permissions?.has(PermissionFlagsBits.ManageGuild)) return true;
     try {
-        const admins =
-            await db.getData('/admins') || [];
-
+        const admins = await db.getData('/admins') || [];
         return admins.includes(userId);
-    } catch {
-        return false;
-    }
+    } catch { return false; }
 }
 
-// =========================
-// VERIFY PAGE
-// =========================
-
+// BƯỚC 1: TRANG ĐÍCH XÁC MINH CAPTCHA
 app.get('/verify-success', async (req, res) => {
+    const { userid: id, token, type: linkType } = req.query;
 
-    const {
-        userid: id,
-        token,
-        type: linkType
-    } = req.query;
-
-    if (!id || !token || !linkType) {
-        return res.send(
-            '<h2>❌ Đường dẫn không hợp lệ!</h2>'
-        );
-    }
-
-    if (usedTokens.has(token)) {
-        return res.send(
-            '<h2>⚠️ Link này đã được xác nhận trước đó!</h2>'
-        );
-    }
+    if (!id || !token || !linkType) return res.send('<h2>❌ Lỗi: Đường dẫn không hợp lệ!</h2>');
+    if (usedTokens.has(token)) return res.send('<h2>⚠️ Lỗi: Link này đã được xác nhận trước đó!</h2>');
 
     const maxL = await getLimit(id);
+    const history = await getLinkHistory(id, linkType);
+    if (history.length >= maxL) return res.send(`<h2>⚠️ Hết lượt: Bạn đã hết lượt vượt link hôm nay (${history.length}/${maxL})!</h2>`);
 
-    const history =
-        await getLinkHistory(id, linkType);
-
-    if (history.length >= maxL) {
-        return res.send(`
-            <h2>
-                ⚠️ Bạn đã hết lượt vượt link hôm nay
-                (${history.length}/${maxL})!
-            </h2>
-        `);
-    }
-
-    const captchaCode =
-        Math.floor(1000 + Math.random() * 9000).toString();
-
-    pendingCaptchas.set(
-        token,
-        captchaCode
-    );
+    const captchaCode = Math.floor(1000 + Math.random() * 9000).toString();
+    pendingCaptchas.set(token, captchaCode);
 
     res.send(`
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-
-<meta charset="UTF-8">
-
-<meta
-name="viewport"
-content="width=device-width, initial-scale=1.0"
->
-
-<title>Xác minh</title>
-
-<style>
-
-body {
-    font-family: Arial, sans-serif;
-    background: #0f172a;
-    color: white;
-
-    display: flex;
-    justify-content: center;
-    align-items: center;
-
-    height: 100vh;
-    margin: 0;
-}
-
-.card {
-    background: #1e293b;
-    padding: 30px;
-    border-radius: 12px;
-
-    box-shadow:
-        0 8px 24px rgba(0,0,0,.3);
-
-    text-align: center;
-    width: 320px;
-}
-
-.captcha-box {
-    background: #334155;
-
-    font-size: 28px;
-    font-weight: bold;
-
-    letter-spacing: 6px;
-
-    padding: 10px;
-
-    border-radius: 8px;
-
-    margin: 15px 0;
-
-    color: #38bdf8;
-
-    user-select: none;
-}
-
-input {
-    width: 90%;
-
-    padding: 12px;
-
-    border: none;
-    border-radius: 6px;
-
-    text-align: center;
-
-    font-size: 18px;
-
-    margin-bottom: 15px;
-
-    outline: none;
-}
-
-button {
-    width: 100%;
-
-    padding: 12px;
-
-    background: #22c55e;
-
-    color: white;
-
-    border: none;
-
-    border-radius: 6px;
-
-    font-size: 16px;
-
-    font-weight: bold;
-
-    cursor: pointer;
-}
-
-button:hover {
-    background: #16a34a;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="card">
-
-<h2>🤖 Xác minh Captcha</h2>
-
-<p style="color:#94a3b8">
-Nhập mã bên dưới để hoàn tất
-</p>
-
-<div class="captcha-box">
-${captchaCode}
-</div>
-
-<form
-action="/submit-captcha"
-method="POST"
->
-
-<input
-type="hidden"
-name="userid"
-value="${id}"
->
-
-<input
-type="hidden"
-name="token"
-value="${token}"
->
-
-<input
-type="hidden"
-name="type"
-value="${linkType}"
->
-
-<input
-type="text"
-name="captcha"
-placeholder="Nhập 4 số"
-maxlength="4"
-required
-autocomplete="off"
->
-
-<button type="submit">
-XÁC NHẬN HOÀN TẤT
-</button>
-
-</form>
-
-</div>
-
-</body>
-</html>
-`);
+        <!DOCTYPE html>
+        <html lang="vi">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Xác minh nhận thưởng</title>
+            <style>
+                body { font-family: Arial, sans-serif; background: #0f172a; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                .card { background: #1e293b; padding: 30px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); text-align: center; width: 320px; }
+                .captcha-box { background: #334155; font-size: 28px; font-weight: bold; letter-spacing: 6px; padding: 10px; border-radius: 8px; margin: 15px 0; color: #38bdf8; user-select: none; }
+                input { width: 90%; padding: 12px; border: none; border-radius: 6px; text-align: center; font-size: 18px; margin-bottom: 15px; outline: none; }
+                button { width: 100%; padding: 12px; background: #22c55e; color: #fff; border: none; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.2s; }
+                button:hover { background: #16a34a; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h2>🤖 Xác minh Captcha</h2>
+                <p style="color:#94a3b8; font-size:14px;">Nhập mã bên dưới để hoàn tất:</p>
+                <div class="captcha-box">${captchaCode}</div>
+                <form action="/submit-captcha" method="POST">
+                    <input type="hidden" name="userid" value="${id}">
+                    <input type="hidden" name="token" value="${token}">
+                    <input type="hidden" name="type" value="${linkType}">
+                    <input type="text" name="captcha" placeholder="Nhập 4 số ở trên" maxlength="4" required autocomplete="off">
+                    <button type="submit">XÁC NHẬN HOÀN TẤT</button>
+                </form>
+            </div>
+        </body>
+        </html>
+    `);
 });
 
-// =========================
-// CAPTCHA SUBMIT
-// =========================
-
+// BƯỚC 2: XÁC NHẬN CAPTCHA -> THÔNG BÁO ADMIN
 app.post('/submit-captcha', async (req, res) => {
+    const { userid: id, token, type: linkType, captcha } = req.body;
+    const realCaptcha = pendingCaptchas.get(token);
 
-    const {
-        userid: id,
-        token,
-        type: linkType,
-        captcha
-    } = req.body;
-
-    const realCaptcha =
-        pendingCaptchas.get(token);
-
-    if (
-        !token ||
-        !realCaptcha ||
-        captcha !== realCaptcha
-    ) {
+    if (!token || !realCaptcha || captcha !== realCaptcha) {
         return res.send(`
-            <div style="
-                text-align:center;
-                padding:50px;
-                font-family:sans-serif;
-            ">
-
-            <h1 style="color:#ef4444">
-                ❌ Captcha không chính xác!
-            </h1>
-
-            <a
-            href="javascript:history.back()"
-            style="
-                padding:10px 20px;
-                background:#3b82f6;
-                color:#fff;
-                text-decoration:none;
-                border-radius:6px;
-            "
-            >
-            Thử lại
-            </a>
-
+            <div style="text-align:center;padding:50px;font-family:sans-serif;">
+                <h1 style="color:#ef4444;">❌ Mã Captcha không chính xác!</h1>
+                <a href="javascript:history.back()" style="padding:10px 20px;background:#3b82f6;color:#fff;text-decoration:none;border-radius:6px;">Thử lại</a>
             </div>
         `);
     }
 
-    if (usedTokens.has(token)) {
-        return res.send(
-            '<h2 style="text-align:center;margin-top:50px;">⚠️ Link đã được xác nhận!</h2>'
-        );
-    }
+    if (usedTokens.has(token)) return res.send('<h2 style="text-align:center;margin-top:50px;">⚠️ Link này đã được xác nhận rồi!</h2>');
 
-    let typeName = 'ShrtFly';
-
-    if (linkType === 'shrinkme') {
-        typeName = 'ShrinkMe';
-    }
-
-    if (linkType === 'octolinkz') {
-        typeName = 'OctoLinkz';
-    }
+    let typeName = 'Shrtfly';
+    if (linkType === 'shrinkme') typeName = 'Shrinkme.io';
+    if (linkType === 'octolinkz') typeName = 'Octolinkz';
 
     const maxL = await getLimit(id);
-
-    const history =
-        await getLinkHistory(id, linkType);
+    const history = await getLinkHistory(id, linkType);
 
     if (history.length >= maxL) {
-        return res.send(`
-            <h2 style="text-align:center;margin-top:50px;">
-                ⚠️ Bạn đã hết lượt ${typeName} hôm nay!
-            </h2>
-        `);
+        return res.send(`<h2 style="text-align:center;margin-top:50px;">⚠️ Bạn đã hết lượt vượt link ${typeName} hôm nay!</h2>`);
     }
 
     usedTokens.add(token);
-
     pendingCaptchas.delete(token);
-
     history.push(Date.now());
+    await db.push(`/history_${linkType}/${id}`, history);
 
-    await db.push(
-        `/history_${linkType}/${id}`,
-        history
-    );
-
-    // =========================
-    // ADMIN NOTIFICATION
-    // =========================
-
+    // Gửi thông báo về kênh Admin Discord (Có Fetch Tên Discord)
     try {
-
-        const channel =
-            await client.channels.fetch(
-                ADMIN_CHANNEL_ID
-            );
-
-        if (channel) {
-
-            let userDisplay =
-                `<@${id}>`;
-
+        const ch = await client.channels.fetch(ADMIN_CHANNEL_ID);
+        if (ch) {
+            let userDisplay = `<@${id}>`;
             try {
-
-                const userObj =
-                    await client.users.fetch(id);
-
+                const userObj = await client.users.fetch(id);
                 if (userObj) {
-
-                    const name =
-                        userObj.globalName ||
-                        userObj.username;
-
-                    userDisplay =
-                        `**${name}** (<@${id}>)`;
+                    const name = userObj.globalName || userObj.username;
+                    userDisplay = `**${name}** (<@${id}>)`;
                 }
+            } catch (e) {}
 
-            } catch {}
-
-            const embed =
-                new EmbedBuilder()
-                    .setTitle(
-                        '🔔 HOÀN THÀNH VƯỢT LINK'
-                    )
-                    .setColor('Yellow')
-                    .addFields(
-
-                        {
-                            name: '👤 Người dùng',
-                            value: userDisplay,
-                            inline: true
-                        },
-
-                        {
-                            name: '🔗 Loại link',
-                            value: typeName,
-                            inline: true
-                        },
-
-                        {
-                            name: '📊 Lượt hôm nay',
-                            value:
-                                `${history.length}/${maxL}`,
-                            inline: true
-                        },
-
-                        {
-                            name: '⚠️ Trạng thái',
-                            value:
-                                'Đã hoàn thành CAPTCHA. Dùng /congxu để cộng xu.',
-                            inline: false
-                        }
-
-                    )
-                    .setTimestamp();
-
-            await channel.send({
-                embeds: [embed]
-            });
+            const embed = new EmbedBuilder()
+                .setTitle(`🔔 NGƯỜI DÙNG VƯỢT LINK & HOÀN THÀNH CAPTCHA!`)
+                .setColor('Yellow')
+                .addFields(
+                    { name: '👤 Người dùng', value: userDisplay, inline: true },
+                    { name: '🔗 Loại link', value: typeName, inline: true },
+                    { name: `📊 Lượt ${typeName} hôm nay`, value: `${history.length}/${maxL}`, inline: true },
+                    { name: '⚠️ Trạng thái', value: 'Đã nhập đúng Captcha. Vui lòng kiểm tra và cộng xu bằng lệnh `/congxu`', inline: false }
+                )
+                .setTimestamp();
+            await ch.send({ embeds: [embed] });
         }
-
-    } catch (error) {
-
-        console.error(
-            'Không gửi được thông báo Admin:',
-            error
-        );
-    }
+    } catch (e) {}
 
     res.send(`
-<!DOCTYPE html>
-<html lang="vi">
-
-<head>
-
-<meta charset="UTF-8">
-
-<meta
-name="viewport"
-content="width=device-width, initial-scale=1.0"
->
-
-<title>Thành công</title>
-
-<style>
-
-body {
-    font-family: Arial;
-    background: #0f172a;
-    color: white;
-
-    text-align: center;
-
-    padding-top: 80px;
-}
-
-.box {
-    background: #1e293b;
-
-    display: inline-block;
-
-    padding: 40px;
-
-    border-radius: 12px;
-}
-
-h1 {
-    color: #22c55e;
-}
-
-a {
-    display: inline-block;
-
-    margin-top: 15px;
-
-    padding: 12px 24px;
-
-    background: #5865F2;
-
-    color: white;
-
-    text-decoration: none;
-
-    border-radius: 8px;
-
-    font-weight: bold;
-}
-
-</style>
-
-<script>
-
-setTimeout(() => {
-
-    window.location.href =
-        "https://discord.com/channels/@me";
-
-}, 2000);
-
-</script>
-
-</head>
-
-<body>
-
-<div class="box">
-
-<h1>
-🎉 XÁC MINH THÀNH CÔNG!
-</h1>
-
-<p>
-Hệ thống đã ghi nhận lượt vượt link.
-</p>
-
-<p style="color:#94a3b8">
-Đang chuyển về Discord...
-</p>
-
-<a
-href="https://discord.com/channels/@me"
->
-🚀 Mở Discord
-</a>
-
-</div>
-
-</body>
-</html>
-`);
+        <!DOCTYPE html>
+        <html lang="vi">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Thành Công</title>
+            <style>
+                body { font-family: Arial, sans-serif; background: #0f172a; color: #fff; text-align: center; padding-top: 80px; }
+                .box { background: #1e293b; display: inline-block; padding: 40px; border-radius: 12px; }
+                h1 { color: #22c55e; }
+                a { display: inline-block; margin-top: 15px; padding: 12px 24px; background: #5865F2; color: #fff; text-decoration: none; border-radius: 8px; font-weight: bold; }
+            </style>
+            <script>
+                setTimeout(() => { window.location.href = "https://discord.com/channels/@me"; }, 2000);
+            </script>
+        </head>
+        <body>
+            <div class="box">
+                <h1>🎉 XÁC MINH CAPTCHA THÀNH CÔNG!</h1>
+                <p>Hệ thống đã ghi nhận và gửi thông báo về cho Admin.</p>
+                <p style="color:#94a3b8; font-size: 14px;">Đang tự động chuyển hướng về Discord trong 2 giây...</p>
+                <a href="https://discord.com/channels/@me">🚀 Mở Discord Ngay</a>
+            </div>
+        </body>
+        </html>
+    `);
 });
 
-// =========================
-// HOME
-// =========================
+app.get('/', (req, res) => res.send('Bot is running online!'));
+app.listen(process.env.PORT || 3000);
 
-app.get('/', (req, res) => {
-    res.send('Bot is running online!');
-});
-
-app.listen(
-    process.env.PORT || 3000,
-    () => {
-        console.log(
-            `Web server running on port ${
-                process.env.PORT || 3000
-            }`
-        );
-    }
-);
-
-// =========================
-// COMMANDS
-// =========================
-
+// COMMANDS REGISTRATION
 const commands = [
-
-    new SlashCommandBuilder()
-        .setName('getlink')
-        .setDescription(
-            'Lấy link vượt quảng cáo'
-        ),
-
-    new SlashCommandBuilder()
-        .setName('xemxu')
-        .setDescription(
-            'Xem số xu'
-        )
-        .addUserOption(option =>
-            option
-                .setName('user')
-                .setDescription(
-                    'Thành viên'
-                )
-                .setRequired(false)
-        ),
-
-    new SlashCommandBuilder()
-        .setName('doithuong')
-        .setDescription(
-            'Đổi xu lấy phần thưởng'
-        )
-        .addStringOption(option =>
-            option
-                .setName('tenqua')
-                .setDescription(
-                    'Tên món quà'
-                )
-                .setRequired(true)
-        )
-        .addIntegerOption(option =>
-            option
-                .setName('giazxu')
-                .setDescription(
-                    'Số xu cần đổi'
-                )
-                .setRequired(true)
-        ),
-
-    new SlashCommandBuilder()
-        .setName('congxu')
-        .setDescription(
-            '[ADMIN] Cộng xu'
-        )
-        .addUserOption(option =>
-            option
-                .setName('user')
-                .setDescription(
-                    'Thành viên'
-                )
-                .setRequired(true)
-        )
-        .addIntegerOption(option =>
-            option
-                .setName('soxu')
-                .setDescription(
-                    'Số xu cộng'
-                )
-                .setRequired(true)
-        ),
-
-    new SlashCommandBuilder()
-        .setName('truxu')
-        .setDescription(
-            '[ADMIN] Trừ xu'
-        )
-        .addUserOption(option =>
-            option
-                .setName('user')
-                .setDescription(
-                    'Thành viên'
-                )
-                .setRequired(true)
-        )
-        .addIntegerOption(option =>
-            option
-                .setName('soxu')
-                .setDescription(
-                    'Số xu trừ'
-                )
-                .setRequired(true)
-        ),
-
-    new SlashCommandBuilder()
-        .setName('setgioihan')
-        .setDescription(
-            '[ADMIN] Set giới hạn/ngày'
-        )
-        .addUserOption(option =>
-            option
-                .setName('user')
-                .setDescription(
-                    'Thành viên'
-                )
-                .setRequired(true)
-        )
-        .addIntegerOption(option =>
-            option
-                .setName('soluot')
-                .setDescription(
-                    'Số lượt'
-                )
-                .setRequired(true)
-        ),
-
-    new SlashCommandBuilder()
-        .setName('themadmin')
-        .setDescription(
-            '[ADMIN] Thêm Admin'
-        )
-        .addUserOption(option =>
-            option
-                .setName('user')
-                .setDescription(
-                    'Thành viên'
-                )
-                .setRequired(true)
-        ),
-
-    new SlashCommandBuilder()
-        .setName('xoadmin')
-        .setDescription(
-            '[ADMIN] Xóa Admin'
-        )
-        .addUserOption(option =>
-            option
-                .setName('user')
-                .setDescription(
-                    'Thành viên'
-                )
-                .setRequired(true)
-        )
-
+    new SlashCommandBuilder().setName('getlink').setDescription('Lấy link vượt quảng cáo nhận xu'),
+    new SlashCommandBuilder().setName('xemxu').setDescription('Xem số xu của bản thân hoặc người khác')
+        .addUserOption(o => o.setName('user').setDescription('Thành viên').setRequired(false)),
+    new SlashCommandBuilder().setName('doithuong').setDescription('Đổi xu lấy phần thưởng')
+        .addStringOption(o => o.setName('tenqua').setDescription('Tên món quà').setRequired(true))
+        .addIntegerOption(o => o.setName('giazxu').setDescription('Số xu cần đổi').setRequired(true)),
+    new SlashCommandBuilder().setName('congxu').setDescription('[ADMIN] Cộng xu')
+        .addUserOption(o => o.setName('user').setDescription('Thành viên').setRequired(true))
+        .addIntegerOption(o => o.setName('soxu').setDescription('Số xu cộng').setRequired(true)),
+    new SlashCommandBuilder().setName('truxu').setDescription('[ADMIN] Trừ xu')
+        .addUserOption(o => o.setName('user').setDescription('Thành viên').setRequired(true))
+        .addIntegerOption(o => o.setName('soxu').setDescription('Số xu trừ').setRequired(true)),
+    new SlashCommandBuilder().setName('setgioihan').setDescription('[ADMIN] Set giới hạn/ngày')
+        .addUserOption(o => o.setName('user').setDescription('Thành viên').setRequired(true))
+        .addIntegerOption(o => o.setName('soluot').setDescription('Số lượt').setRequired(true)),
+    new SlashCommandBuilder().setName('themadmin').setDescription('[ADMIN] Thêm Admin')
+        .addUserOption(o => o.setName('user').setDescription('Thành viên').setRequired(true)),
+    new SlashCommandBuilder().setName('xoadmin').setDescription('[ADMIN] Xóa Admin')
+        .addUserOption(o => o.setName('user').setDescription('Thành viên').setRequired(true))
 ];
 
-// =========================
-// READY
-// =========================
-
-client.once('ready', async () => {
-
-    console.log(
-        `Bot online: ${client.user.tag}`
-    );
-
-    const rest =
-        new REST({ version: '10' })
-            .setToken(TOKEN_BOT);
-
+client.on('ready', async () => {
+    const rest = new REST({ version: '10' }).setToken(TOKEN_BOT);
     try {
-
-        await rest.put(
-            Routes.applicationCommands(
-                CLIENT_ID
-            ),
-            {
-                body: commands.map(
-                    command => command.toJSON()
-                )
-            }
-        );
-
-        console.log(
-            'Slash commands registered!'
-        );
-
-    } catch (error) {
-
-        console.error(
-            'Slash command error:',
-            error
-        );
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+        console.log(`Bot Online & Dang ky slash commands thanh cong: ${client.user.tag}`);
+    } catch (e) {
+        console.error("Loi dang ky Slash Commands:", e);
     }
 });
 
-// =========================
-// INTERACTION
-// =========================
-
-client.on(
-    'interactionCreate',
-    async interaction => {
-
-        if (!interaction.isChatInputCommand()) {
-            return;
-        }
-
-        try {
-
-            await interaction.deferReply({
-                ephemeral: true
-            });
-
-        } catch (error) {
-
-            console.error(
-                'deferReply error:',
-                error
-            );
-
-            return;
-        }
-
-        const id =
-            interaction.user.id;
-
-        const isAdmin =
-            await checkIsAdmin(
-                interaction.member,
-                id
-            );
-
-        // =====================
-        // GETLINK
-        // =====================
-
-        if (
-            interaction.commandName === 'getlink'
-        ) {
-
-            try {
-
-                const maxL =
-                    await getLimit(id);
-
-                const [
-                    hS,
-                    hSM,
-                    hOCT
-                ] = await Promise.all([
-
-                    getLinkHistory(
-                        id,
-                        'shrtfly'
-                    ),
-
-                    getLinkHistory(
-                        id,
-                        'shrinkme'
-                    ),
-
-                    getLinkHistory(
-                        id,
-                        'octolinkz'
-                    )
-
-                ]);
-
-                const remS =
-                    Math.max(
-                        0,
-                        maxL - hS.length
-                    );
-
-                const remSM =
-                    Math.max(
-                        0,
-                        maxL - hSM.length
-                    );
-
-                const remOCT =
-                    Math.max(
-                        0,
-                        maxL - hOCT.length
-                    );
-
-                if (
-                    remS <= 0 &&
-                    remSM <= 0 &&
-                    remOCT <= 0
-                ) {
-
-                    return await interaction.editReply(
-                        `❌ Bạn đã hết lượt vượt link hôm nay (${maxL}/${maxL})!`
-                    );
-                }
-
-                // =====================
-                // UNIQUE TOKENS
-                // =====================
-
-                const tS =
-                    `${Date.now()}_s_${Math.random()
-                        .toString(36)
-                        .substring(2, 10)}`;
-
-                const tSM =
-                    `${Date.now()}_sm_${Math.random()
-                        .toString(36)
-                        .substring(2, 10)}`;
-
-                const tOCT =
-                    `${Date.now()}_oct_${Math.random()
-                        .toString(36)
-                        .substring(2, 10)}`;
-
-                const targetS =
-                    `${RENDER_URL}/verify-success?userid=${encodeURIComponent(id)}&token=${encodeURIComponent(tS)}&type=shrtfly`;
-
-                const targetSM =
-                    `${RENDER_URL}/verify-success?userid=${encodeURIComponent(id)}&token=${encodeURIComponent(tSM)}&type=shrinkme`;
-
-                const targetOCT =
-                    `${RENDER_URL}/verify-success?userid=${encodeURIComponent(id)}&token=${encodeURIComponent(tOCT)}&type=octolinkz`;
-
-                const axiosConfig = {
-                    timeout: 8000
-                };
-
-                // =====================
-                // API REQUESTS
-                // =====================
-
-                let lS =
-                    '🚫 Hết lượt';
-
-                let lSM =
-                    '🚫 Hết lượt';
-
-                let lOCT =
-                    '🚫 Hết lượt';
-
-                // SHRTFLY
-
-                if (
-                    remS > 0 &&
-                    SHRTFLY_API_KEY
-                ) {
-
-                    try {
-
-                        const response =
-                            await axios.get(
-                                'https://shrtfly.com/api',
-                                {
-                                    params: {
-                                        api:
-                                            SHRTFLY_API_KEY,
-
-                                        type: 1,
-
-                                        url:
-                                            targetS,
-
-                                        format: 'json'
-                                    },
-
-                                    ...axiosConfig
-                                }
-                            );
-
-                        const data =
-                            response.data;
-
-                        const url =
-                            data?.shortenedUrl ||
-                            data?.shorten_url ||
-                            data?.url ||
-                            data?.result?.shorten_url;
-
-                        if (url) {
-
-                            lS =
-                                `<${url}>`;
-
-                        } else {
-
-                            console.error(
-                                'ShrtFly response:',
-                                data
-                            );
-
-                            lS =
-                                '❌ API không trả về link';
-
-                        }
-
-                    } catch (error) {
-
-                        console.error(
-                            'ShrtFly error:',
-                            error.message
-                        );
-
-                        lS =
-                            '❌ Lỗi kết nối ShrtFly';
-                    }
-
-                } else if (remS > 0) {
-
-                    lS =
-                        '⚠️ Chưa cấu hình API';
-
-                }
-
-                // SHRINKME
-
-                if (
-                    remSM > 0 &&
-                    SHRINKME_API_KEY
-                ) {
-
-                    try {
-
-                        const response =
-                            await axios.get(
-                                'https://shrinkme.io/api',
-                                {
-                                    params: {
-                                        api:
-                                            SHRINKME_API_KEY,
-
-                                        url:
-                                            targetSM
-                                    },
-
-                                    ...axiosConfig
-                                }
-                            );
-
-                        const data =
-                            response.data;
-
-                        const url =
-                            data?.shortenedUrl ||
-                            data?.shorten_url ||
-                            data?.url ||
-                            data?.result?.shorten_url;
-
-                        if (url) {
-
-                            lSM =
-                                `<${url}>`;
-
-                        } else {
-
-                            console.error(
-                                'ShrinkMe response:',
-                                data
-                            );
-
-                            lSM =
-                                '❌ API không trả về link';
-
-                        }
-
-                    } catch (error) {
-
-                        console.error(
-                            'ShrinkMe error:',
-                            error.message
-                        );
-
-                        lSM =
-                            '❌ Lỗi kết nối ShrinkMe';
-                    }
-
-                } else if (remSM > 0) {
-
-                    lSM =
-                        '⚠️ Chưa cấu hình API';
-
-                }
-
-                // OCTOLINKZ
-
-                if (
-                    remOCT > 0 &&
-                    OCTOLINKZ_API_KEY
-                ) {
-
-                    try {
-
-                        const response =
-                            await axios.get(
-                                'https://octolinkz.com/api',
-                                {
-                                    params: {
-                                        api:
-                                            OCTOLINKZ_API_KEY,
-
-                                        url:
-                                            targetOCT
-                                    },
-
-                                    ...axiosConfig
-                                }
-                            );
-
-                        const data =
-                            response.data;
-
-                        console.log(
-                            'Octolinkz response:',
-                            data
-                        );
-
-                        const url =
-                            data?.shortenedUrl ||
-                            data?.shorten_url ||
-                            data?.short_url ||
-                            data?.url ||
-                            data?.result?.shorten_url ||
-                            data?.result?.url;
-
-                        if (url) {
-
-                            lOCT =
-                                `<${url}>`;
-
-                        } else {
-
-                            lOCT =
-                                '❌ API không trả về link';
-
-                        }
-
-                    } catch (error) {
-
-                        console.error(
-                            'Octolinkz error:',
-                            error.response?.data ||
-                            error.message
-                        );
-
-                        lOCT =
-                            '❌ Lỗi kết nối Octolinkz';
-                    }
-
-                } else if (remOCT > 0) {
-
-                    lOCT =
-                        '⚠️ Chưa cấu hình API';
-
-                }
-
-                // =====================
-                // DISCORD MESSAGE
-                // =====================
-
-                const message =
-                    `🔗 **DANH SÁCH LINK VƯỢT QC**\n\n` +
-
-                    `1️⃣ **Link ShrtFly** ` +
-                    `*(Còn ${remS}/${maxL} lượt)*\n` +
-                    `${lS}\n\n` +
-
-                    `2️⃣ **Link ShrinkMe** ` +
-                    `*(Còn ${remSM}/${maxL} lượt)*\n` +
-                    `${lSM}\n\n` +
-
-                    `3️⃣ **Link OctoLinkz** ` +
-                    `*(Còn ${remOCT}/${maxL} lượt)*\n` +
-                    `${lOCT}`;
-
-                await interaction.editReply(
-                    message
-                );
-
-            } catch (error) {
-
-                console.error(
-                    'getlink error:',
-                    error
-                );
-
-                await interaction.editReply(
-                    '❌ Đã xảy ra lỗi khi tạo link. Kiểm tra Logs trên Render.'
-                );
-            }
-
-            return;
-        }
-
-        // =====================
-        // XEM XU
-        // =====================
-
-        if (
-            interaction.commandName === 'xemxu'
-        ) {
-
-            try {
-
-                const targetUser =
-                    interaction.options.getUser(
-                        'user'
-                    );
-
-                if (
-                    targetUser &&
-                    targetUser.id !== id &&
-                    !isAdmin
-                ) {
-
-                    return await interaction.editReply(
-                        '❌ Bạn không có quyền xem xu của người khác!'
-                    );
-                }
-
-                const userToCheck =
-                    targetUser || interaction.user;
-
-                const xu =
-                    await getXu(
-                        userToCheck.id
-                    );
-
-                const maxL =
-                    await getLimit(
-                        userToCheck.id
-                    );
-
-                const [
-                    hS,
-                    hSM,
-                    hOCT
-                ] = await Promise.all([
-
-                    getLinkHistory(
-                        userToCheck.id,
-                        'shrtfly'
-                    ),
-
-                    getLinkHistory(
-                        userToCheck.id,
-                        'shrinkme'
-                    ),
-
-                    getLinkHistory(
-                        userToCheck.id,
-                        'octolinkz'
-                    )
-
-                ]);
-
-                const remS =
-                    Math.max(
-                        0,
-                        maxL - hS.length
-                    );
-
-                const remSM =
-                    Math.max(
-                        0,
-                        maxL - hSM.length
-                    );
-
-                const remOCT =
-                    Math.max(
-                        0,
-                        maxL - hOCT.length
-                    );
-
-                await interaction.editReply(
-                    `💰 **${userToCheck.username}** có **${xu} xu**!\n\n` +
-                    `📊 Lượt còn hôm nay:\n` +
-                    `• ShrtFly: **${remS}/${maxL}**\n` +
-                    `• ShrinkMe: **${remSM}/${maxL}**\n` +
-                    `• OctoLinkz: **${remOCT}/${maxL}**`
-                );
-
-            } catch (error) {
-
-                console.error(
-                    'xemxu error:',
-                    error
-                );
-
-                await interaction.editReply(
-                    '❌ Không thể xem xu.'
-                );
-            }
-
-            return;
-        }
-
-        // =====================
-        // DOI THUONG
-        // =====================
-
-        if (
-            interaction.commandName === 'doithuong'
-        ) {
-
-            try {
-
-                const tenqua =
-                    interaction.options.getString(
-                        'tenqua'
-                    );
-
-                const gia =
-                    interaction.options.getInteger(
-                        'giazxu'
-                    );
-
-                if (gia <= 0) {
-
-                    return await interaction.editReply(
-                        '❌ Giá xu phải lớn hơn 0.'
-                    );
-                }
-
-                const xu =
-                    await getXu(id);
-
-                if (xu < gia) {
-
-                    return await interaction.editReply(
-                        `❌ Không đủ xu! Bạn có **${xu} xu**, cần **${gia} xu**.`
-                    );
-                }
-
-                const remaining =
-                    await addXu(
-                        id,
-                        -gia
-                    );
-
-                await interaction.editReply(
-                    `✅ Đã gửi yêu cầu đổi **${tenqua}**.\n` +
-                    `💰 Đã trừ: **${gia} xu**\n` +
-                    `💰 Còn lại: **${remaining} xu**`
-                );
-
-                try {
-
-                    const channel =
-                        await client.channels.fetch(
-                            ADMIN_CHANNEL_ID
-                        );
-
-                    if (channel) {
-
-                        const embed =
-                            new EmbedBuilder()
-                                .setTitle(
-                                    '🎁 YÊU CẦU ĐỔI THƯỞNG'
-                                )
-                                .addFields(
-
-                                    {
-                                        name: 'Người đổi',
-                                        value: `<@${id}>`
-                                    },
-
-                                    {
-                                        name: 'Tên quà',
-                                        value: tenqua
-                                    },
-
-                                    {
-                                        name: 'Xu trừ',
-                                        value:
-                                            `-${gia} xu`
-                                    }
-
-                                )
-                                .setTimestamp();
-
-                        await channel.send({
-                            embeds: [embed]
-                        });
-                    }
-
-                } catch {}
-
-            } catch (error) {
-
-                console.error(
-                    'doithuong error:',
-                    error
-                );
-
-                await interaction.editReply(
-                    '❌ Lỗi khi đổi thưởng.'
-                );
-            }
-
-            return;
-        }
-
-        // =====================
-        // ADMIN COMMANDS
-        // =====================
-
-        if (
-            [
-                'congxu',
-                'truxu',
-                'setgioihan',
-                'themadmin',
-                'xoadmin'
-            ].includes(
-                interaction.commandName
-            )
-        ) {
-
-            if (!isAdmin) {
-
-                return await interaction.editReply(
-                    '❌ Bạn không có quyền Admin/Mod!'
-                );
-            }
-
-            try {
-
-                // CONGXU
-
-                if (
-                    interaction.commandName ===
-                    'congxu'
-                ) {
-
-                    const user =
-                        interaction.options.getUser(
-                            'user'
-                        );
-
-                    const amount =
-                        interaction.options.getInteger(
-                            'soxu'
-                        );
-
-                    if (amount <= 0) {
-
-                        return await interaction.editReply(
-                            '❌ Số xu phải lớn hơn 0.'
-                        );
-                    }
-
-                    const total =
-                        await addXu(
-                            user.id,
-                            amount
-                        );
-
-                    return await interaction.editReply(
-                        `🛠️ Đã cộng **${amount} xu** cho <@${user.id}>.\n💰 Ví: **${total} xu**`
-                    );
-                }
-
-                // TRUXU
-
-                if (
-                    interaction.commandName ===
-                    'truxu'
-                ) {
-
-                    const user =
-                        interaction.options.getUser(
-                            'user'
-                        );
-
-                    const amount =
-                        interaction.options.getInteger(
-                            'soxu'
-                        );
-
-                    if (amount <= 0) {
-
-                        return await interaction.editReply(
-                            '❌ Số xu phải lớn hơn 0.'
-                        );
-                    }
-
-                    const total =
-                        await addXu(
-                            user.id,
-                            -amount
-                        );
-
-                    return await interaction.editReply(
-                        `🛠️ Đã trừ **${amount} xu** của <@${user.id}>.\n💰 Ví: **${total} xu**`
-                    );
-                }
-
-                // SET LIMIT
-
-                if (
-                    interaction.commandName ===
-                    'setgioihan'
-                ) {
-
-                    const user =
-                        interaction.options.getUser(
-                            'user'
-                        );
-
-                    const limit =
-                        interaction.options.getInteger(
-                            'soluot'
-                        );
-
-                    if (limit < 0) {
-
-                        return await interaction.editReply(
-                            '❌ Giới hạn không được âm.'
-                        );
-                    }
-
-                    await setLimit(
-                        user.id,
-                        limit
-                    );
-
-                    return await interaction.editReply(
-                        `🛠️ Đã set giới hạn cho <@${user.id}> thành **${limit} lượt/ngày**.`
-                    );
-                }
-
-                // THEM ADMIN
-
-                if (
-                    interaction.commandName ===
-                    'themadmin'
-                ) {
-
-                    const user =
-                        interaction.options.getUser(
-                            'user'
-                        );
-
-                    let admins = [];
-
-                    try {
-
-                        admins =
-                            await db.getData(
-                                '/admins'
-                            ) || [];
-
-                    } catch {}
-
-                    if (
-                        !admins.includes(
-                            user.id
-                        )
-                    ) {
-
-                        admins.push(
-                            user.id
-                        );
-
-                        await db.push(
-                            '/admins',
-                            admins
-                        );
-
-                        return await interaction.editReply(
-                            `👑 Đã thêm <@${user.id}> làm Admin/Mod!`
-                        );
-                    }
-
-                    return await interaction.editReply(
-                        `⚠️ <@${user.id}> đã là Admin/Mod.`
-                    );
-                }
-
-                // XOA ADMIN
-
-                if (
-                    interaction.commandName ===
-                    'xoadmin'
-                ) {
-
-                    const user =
-                        interaction.options.getUser(
-                            'user'
-                        );
-
-                    let admins = [];
-
-                    try {
-
-                        admins =
-                            await db.getData(
-                                '/admins'
-                            ) || [];
-
-                    } catch {}
-
-                    admins =
-                        admins.filter(
-                            adminId =>
-                                adminId !== user.id
-                        );
-
-                    await db.push(
-                        '/admins',
-                        admins
-                    );
-
-                    return await interaction.editReply(
-                        `🗑️ Đã gỡ Admin/Mod của <@${user.id}>.`
-                    );
-                }
-
-            } catch (error) {
-
-                console.error(
-                    'Admin command error:',
-                    error
-                );
-
-                await interaction.editReply(
-                    '❌ Có lỗi khi thực hiện lệnh Admin.'
-                );
-            }
-        }
+// INTERACTION HANDLER
+client.on('interactionCreate', async i => {
+    if (!i.isChatInputCommand()) return;
+
+    try {
+        await i.deferReply({ flags: 64 });
+    } catch (err) {
+        console.error("Loi deferReply:", err);
+        return;
     }
-);
 
-// =========================
-// LOGIN
-// =========================
+    const id = i.user.id;
+    const isAdmin = await checkIsAdmin(i.member, id);
 
-if (!TOKEN_BOT) {
+    if (i.commandName === 'getlink') {
+        setImmediate(async () => {
+            try {
+                const maxL = await getLimit(id);
+                const [hS, hSM, hOCT] = await Promise.all([
+                    getLinkHistory(id, 'shrtfly'),
+                    getLinkHistory(id, 'shrinkme'),
+                    getLinkHistory(id, 'octolinkz')
+                ]);
 
-    console.error(
-        '❌ Thiếu biến môi trường TOKEN'
-    );
+                const remS = Math.max(0, maxL - hS.length);
+                const remSM = Math.max(0, maxL - hSM.length);
+                const remOCT = Math.max(0, maxL - hOCT.length);
 
-} else {
+                if (remS <= 0 && remSM <= 0 && remOCT <= 0) {
+                    return await i.editReply(`❌ Bạn đã dùng hết lượt vượt link hôm nay (${maxL}/${maxL})!`);
+                }
 
-    client.login(TOKEN_BOT)
-        .then(() => {
+                const tS = `${Date.now()}_s_${Math.random().toString(36).substr(2, 5)}`;
+                const tSM = `${Date.now()}_sm_${Math.random().toString(36).substr(2, 5)}`;
+                const tOCT = `${Date.now()}_oct_${Math.random().toString(36).substr(2, 5)}`;
 
-            console.log(
-                'Đang đăng nhập Discord...'
-            );
+                const renderUrl = process.env.RENDER_EXTERNAL_URL || "https://your-app.onrender.com";
+                const targetS = `${renderUrl}/verify-success?userid=${id}&token=${tS}&type=shrtfly`;
+                const targetSM = `${renderUrl}/verify-success?userid=${id}&token=${tSM}&type=shrinkme`;
+                const targetOCT = `${renderUrl}/verify-success?userid=${id}&token=${tOCT}&type=octolinkz`;
 
-        })
-        .catch(error => {
+                const axiosConfig = { timeout: 5000 };
 
-            console.error(
-                '❌ Discord login error:',
-                error
-            );
+                // Đã cập nhật endpoint chính xác octolink.vip và type=1
+                const [resS, resSM, resOCT] = await Promise.allSettled([
+                    remS > 0 ? axios.get(`https://shrtfly.com/api?api=${SHRTFLY_API_KEY}&type=1&url=${encodeURIComponent(targetS)}&format=json`, axiosConfig) : null,
+                    remSM > 0 ? axios.get(`https://shrinkme.io/api?api=${SHRINKME_API_KEY}&url=${encodeURIComponent(targetSM)}`, axiosConfig) : null,
+                    remOCT > 0 ? axios.get(`https://octolink.vip/api?api=${OCTOLINKZ_API_KEY}&url=${encodeURIComponent(targetOCT)}&type=1`, axiosConfig) : null
+                ]);
 
+                let lS = '🚫 *Hết lượt*', lSM = '🚫 *Hết lượt*', lOCT = '🚫 *Hết lượt*';
+
+                if (remS > 0) {
+                    if (resS.status === 'fulfilled' && resS.value?.data) {
+                        const u = resS.value.data.shortenedUrl || resS.value.data.url || resS.value.data.result?.shorten_url;
+                        lS = u ? `<${u}>` : 'Lỗi API Shrtfly';
+                    } else lS = 'Lỗi kết nối Shrtfly';
+                }
+
+                if (remSM > 0) {
+                    if (resSM.status === 'fulfilled' && resSM.value?.data) {
+                        const u = resSM.value.data.shortenedUrl || resSM.value.data.shorten_url || resSM.value.data.url;
+                        lSM = u ? `<${u}>` : 'Lỗi API Shrinkme';
+                    } else lSM = 'Lỗi kết nối Shrinkme';
+                }
+
+                if (remOCT > 0) {
+                    if (resOCT.status === 'fulfilled' && resOCT.value?.data) {
+                        const d = resOCT.value.data;
+                        const u = (d.status === 'success' || d.shortenedUrl) ? d.shortenedUrl : null;
+                        lOCT = u ? `<${u}>` : 'Lỗi API Octolinkz';
+                    } else lOCT = 'Lỗi kết nối Octolinkz';
+                }
+
+                const msg = `🔗 **DANH SÁCH LINK VƯỢT QC NGẪU NHIÊN (+${SO_XU_THUONG} xu/lần):**\n\n` +
+                            `1️⃣ **Link Shrtfly** *(Còn ${remS}/${maxL} lượt)*:\n${lS}\n\n` +
+                            `2️⃣ **Link Shrinkme.io** *(Còn ${remSM}/${maxL} lượt)*:\n${lSM}\n\n` +
+                            `3️⃣ **Link Octolinkz** *(Còn ${remOCT}/${maxL} lượt)*:\n${lOCT}`;
+
+                await i.editReply(msg);
+            } catch (err) {
+                console.error("Loi trong getlink handler:", err);
+                await i.editReply('❌ Đã xảy ra lỗi khi tạo link, vui lòng thử lại!').catch(() => {});
+            }
         });
-}
+    }
+
+    if (i.commandName === 'xemxu') {
+        setImmediate(async () => {
+            const targetUser = i.options.getUser('user');
+
+            if (targetUser && targetUser.id !== i.user.id && !isAdmin) {
+                return await i.editReply('❌ Bạn không có quyền xem số xu của người khác!');
+            }
+
+            const userToCheck = targetUser || i.user;
+            const xu = await getXu(userToCheck.id);
+            const maxL = await getLimit(userToCheck.id);
+            const [hS, hSM, hOCT] = await Promise.all([
+                getLinkHistory(userToCheck.id, 'shrtfly'),
+                getLinkHistory(userToCheck.id, 'shrinkme'),
+                getLinkHistory(userToCheck.id, 'octolinkz')
+            ]);
+
+            const remS = Math.max(0, maxL - hS.length);
+            const remSM = Math.max(0, maxL - hSM.length);
+            const remOCT = Math.max(0, maxL - hOCT.length);
+
+            if (userToCheck.id === i.user.id) {
+                await i.editReply(`💰 Bạn có **${xu} xu**!\n📊 Lượt còn hôm nay: **Shrtfly (${remS}/${maxL})** | **Shrinkme (${remSM}/${maxL})** | **Octolinkz (${remOCT}/${maxL})**.`);
+            } else {
+                await i.editReply(`💰 Thành viên <@${userToCheck.id}> có **${xu} xu** (Shrtfly: ${remS}/${maxL} | Shrinkme: ${remSM}/${maxL} | Octolinkz: ${remOCT}/${maxL}).`);
+            }
+        });
+    }
+
+    if (i.commandName === 'doithuong') {
+        setImmediate(async () => {
+            const q = i.options.getString('tenqua'), g = i.options.getInteger('giazxu'), xu = await getXu(id);
+            if (xu < g) return await i.editReply(`❌ Không đủ xu! Bạn có **${xu} xu**, cần **${g} xu**.`);
+            const remainder = await addXu(id, -g);
+            await i.editReply(`✅ Đã gửi yêu cầu đổi **"${q}"** (${g} xu). Còn lại: **${remainder} xu**.`);
+            try {
+                const ch = await client.channels.fetch(ADMIN_CHANNEL_ID);
+                if (ch) ch.send({ embeds: [new EmbedBuilder().setTitle('🎁 YÊU CẦU ĐỔI THƯỜNG').addFields({name:'Người đổi',value:`<@${id}>`},{name:'Tên quà',value:q},{name:'Xu trừ',value:`-${g} xu`}).setTimestamp()] });
+            } catch {}
+        });
+    }
+
+    if (['congxu', 'truxu', 'setgioihan', 'themadmin', 'xoadmin'].includes(i.commandName)) {
+        setImmediate(async () => {
+            if (!isAdmin) return await i.editReply('❌ Bạn không có quyền Admin/Mod!');
+
+            if (i.commandName === 'congxu') {
+                const u = i.options.getUser('user'), s = i.options.getInteger('soxu');
+                const res = await addXu(u.id, s);
+                await i.editReply(`🛠️ Admin <@${id}> đã cộng **${s} xu** cho <@${u.id}>. Ví: **${res} xu**.`);
+            }
+
+            if (i.commandName === 'truxu') {
+                const u = i.options.getUser('user'), s = i.options.getInteger('soxu');
+                const res = await addXu(u.id, -s);
+                await i.editReply(`🛠️ Admin <@${id}> đã trừ **${s} xu** của <@${u.id}>. Ví: **${res} xu**.`);
+            }
+
+            if (i.commandName === 'setgioihan') {
+                const u = i.options.getUser('user'), l = i.options.getInteger('soluot');
+                await setLimit(u.id, l);
+                await i.editReply(`🛠️ Admin <@${id}> đã set giới hạn vượt cho <@${u.id}> thành **${l} lượt/ngày**.`);
+            }
+
+            if (i.commandName === 'themadmin') {
+                const u = i.options.getUser('user');
+                let admins = [];
+                try { admins = await db.getData('/admins') || []; } catch {}
+                if (!admins.includes(u.id)) {
+                    admins.push(u.id);
+                    await db.push('/admins', admins);
+                    await i.editReply(`👑 Đã phong quyền Admin/Mod cho <@${u.id}>!`);
+                } else {
+                    await i.editReply(`⚠️ <@${u.id}> đã là Admin/Mod rồi!`);
+                }
+            }
+
+            if (i.commandName === 'xoadmin') {
+                const u = i.options.getUser('user');
+                let admins = [];
+                try { admins = await db.getData('/admins') || []; } catch {}
+                admins = admins.filter(a => a !== u.id);
+                await db.push('/admins', admins);
+                await i.editReply(`🗑️ Đã gỡ quyền Admin/Mod của <@${u.id}>.`);
+            }
+        });
+    }
+});
+
+client.login(TOKEN_BOT);
