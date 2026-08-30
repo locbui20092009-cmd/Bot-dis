@@ -262,9 +262,14 @@ client.on('interactionCreate', async i => {
                 const targetSM = `${renderUrl}/verify-success?userid=${id}&token=${tSM}&type=shrinkme`;
                 const targetOCT = `${renderUrl}/verify-success?userid=${id}&token=${tOCT}&type=octolinkz`;
 
-                const axiosConfig = { timeout: 5000 };
+                // Cấu hình Axios có chứa User-Agent để giả lập trình duyệt, vượt chặn từ Cloudflare/Octolink
+                const axiosConfig = { 
+                    timeout: 8000,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    }
+                };
 
-                // Đã cập nhật endpoint chính xác octolink.vip và type=1
                 const [resS, resSM, resOCT] = await Promise.allSettled([
                     remS > 0 ? axios.get(`https://shrtfly.com/api?api=${SHRTFLY_API_KEY}&type=1&url=${encodeURIComponent(targetS)}&format=json`, axiosConfig) : null,
                     remSM > 0 ? axios.get(`https://shrinkme.io/api?api=${SHRINKME_API_KEY}&url=${encodeURIComponent(targetSM)}`, axiosConfig) : null,
@@ -290,9 +295,14 @@ client.on('interactionCreate', async i => {
                 if (remOCT > 0) {
                     if (resOCT.status === 'fulfilled' && resOCT.value?.data) {
                         const d = resOCT.value.data;
-                        const u = (d.status === 'success' || d.shortenedUrl) ? d.shortenedUrl : null;
+                        const u = d.shortenedUrl || d.url || d.shorten_url || (d.status === 'success' ? d.shortenedUrl : null);
                         lOCT = u ? `<${u}>` : 'Lỗi API Octolinkz';
-                    } else lOCT = 'Lỗi kết nối Octolinkz';
+                    } else {
+                        if (resOCT.status === 'rejected') {
+                            console.error("Lỗi chi tiết Octolink:", resOCT.reason?.response?.data || resOCT.reason?.message);
+                        }
+                        lOCT = 'Lỗi kết nối Octolinkz';
+                    }
                 }
 
                 const msg = `🔗 **DANH SÁCH LINK VƯỢT QC NGẪU NHIÊN (+${SO_XU_THUONG} xu/lần):**\n\n` +
